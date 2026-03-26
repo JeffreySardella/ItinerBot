@@ -28,14 +28,14 @@ All components run in one process using `discord.py` background tasks and APSche
 
 ### Trip Activity Events (May 26+)
 
-- **Nightly itinerary at 9pm** — Bot posts a summary of the next day's activities to the channel. Skips posting if the next day has no events. Stops after `TRIP_END_DATE`.
+- **Nightly itinerary at 9pm** — Bot posts a summary of the next day's activities to the channel. Skips posting if the next day has no events. The last nightly post is sent on the evening of `TRIP_END_DATE` (covering that day's remaining activities).
 
 ### Ticket Events (Before May 26)
 
 Escalating alerts:
-1. **Night before at 9pm** — Included in the 9pm nightly post alongside any trip itinerary: "Tomorrow: Buy tickets for [Event] at [time]!"
-2. **30 minutes before sale time** — "[Event] tickets go live in 30 minutes!"
-3. **At sale time** — "TICKETS LIVE NOW for [Event]! Go go go!"
+1. **Night before at 9pm** — Included in the 9pm nightly post alongside any trip itinerary. If sale time is known: "Tomorrow: Buy tickets for [Event] at [time]!" If unknown: "Tomorrow: Buy tickets for [Event] — sale time unknown, check the calendar!"
+2. **30 minutes before sale time** — "[Event] tickets go live in 30 minutes!" (Only fires if `resolved_time` or a specific `start_time` exists. Skipped for all-day events with no resolved time.)
+3. **At sale time** — "TICKETS LIVE NOW for [Event]! Go go go!" (Same condition — skipped if no time is known.)
 
 ### 9pm Nightly Post
 
@@ -54,6 +54,7 @@ When the bot detects a ticket event with no specific time (all-day event):
 3. **If not found:** Posts to channel: "Couldn't find a sale time for [Event] — someone look it up and update the calendar!"
 4. This check runs when the event is first synced (`lookup_initial`) and again the night before as a fallback (`lookup_nightly`). Two separate attempts tracked independently.
 5. If the Google Calendar write fails when updating the sale time, the bot posts the discovered time to the channel so someone can update the calendar manually.
+6. Once `resolved_time` is populated, the 30-min and at-time alerts are scheduled using `resolved_time` as the target. If both lookup attempts fail and the event remains all-day, the timed alerts are skipped — only the night-before callout fires.
 
 ## Data & Storage
 
