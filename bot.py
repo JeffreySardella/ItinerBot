@@ -51,7 +51,7 @@ def get_channel():
 async def sync_calendar():
     logger.info("Syncing calendar...")
     try:
-        events = cal.fetch_events()
+        events = cal.fetch_events(config.CALENDAR_ID)
     except Exception as exc:
         logger.error("Calendar fetch failed: %s", exc)
         return
@@ -92,12 +92,25 @@ async def do_sale_lookup(event: dict, attempt: str):
     if time_str:
         # Parse the discovered time (e.g. "10:00 AM", "10:00 AM EST")
         event_date = event["start_time"][:10]
-        # Strip timezone abbreviations and parse AM/PM
+        # Normalize and parse discovered time
         clean_time = time_str.strip()
         # Remove trailing timezone abbreviations like EST, PST, etc.
         clean_time = re.sub(r"\s+[A-Z]{2,4}$", "", clean_time).strip()
+        # Normalize "a.m."/"p.m." to "AM"/"PM"
+        clean_time = re.sub(r"a\.m\.", "AM", clean_time, flags=re.IGNORECASE)
+        clean_time = re.sub(r"p\.m\.", "PM", clean_time, flags=re.IGNORECASE)
+        clean_time = clean_time.strip()
         try:
-            time_part = datetime.strptime(clean_time, "%I:%M %p")
+            # Try formats: "10:00 AM", "10:00AM", "10:00" (24h)
+            time_part = None
+            for fmt in ("%I:%M %p", "%I:%M%p", "%H:%M"):
+                try:
+                    time_part = datetime.strptime(clean_time, fmt)
+                    break
+                except ValueError:
+                    continue
+            if time_part is None:
+                raise ValueError(f"No format matched: {clean_time}")
             resolved_iso = f"{event_date}T{time_part.strftime('%H:%M:%S')}"
             parsed = datetime.fromisoformat(resolved_iso)
         except ValueError:
@@ -117,7 +130,7 @@ async def do_sale_lookup(event: dict, attempt: str):
         # Try to update Google Calendar
         try:
             end_iso = (parsed + timedelta(hours=1)).isoformat()
-            cal.update_event_time("primary", event["event_id"], resolved_iso, end_iso)
+            cal.update_event_time(config.CALENDAR_ID, event["event_id"], resolved_iso, end_iso)
             if channel:
                 await channel.send(
                     f"Found sale time for **{event['title']}**: "
