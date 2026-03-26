@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 # Setup
 # ---------------------------------------------------------------------------
 intents = discord.Intents.default()
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 db = Database()
 cal = CalendarSync(config.GOOGLE_CREDENTIALS)
@@ -271,6 +272,139 @@ async def nightly_post():
     # Mark night alerts as sent only after successful send
     for ev in ticket_events:
         await db.set_flag(ev["event_id"], "alert_night", 1)
+
+
+# ---------------------------------------------------------------------------
+# Discord commands
+# ---------------------------------------------------------------------------
+@bot.command(name="tickets")
+async def cmd_tickets(ctx):
+    """List all upcoming ticket events and their sale times."""
+    all_events = await db.get_all_events()
+    ticket_events = [
+        e for e in all_events
+        if is_ticket_event(e["start_time"], config.TRIP_START_DATE)
+    ]
+    if not ticket_events:
+        await ctx.send("No upcoming ticket events!")
+        return
+
+    lines = ["**Upcoming Ticket Events:**"]
+    for ev in ticket_events:
+        date_str = ev["start_time"][:10]
+        if ev.get("resolved_time"):
+            time_dt = datetime.fromisoformat(ev["resolved_time"])
+            time_display = time_dt.strftime("%#I:%M %p")
+            lines.append(f"- {date_str} | **{ev['title']}** | Sale at {time_display}")
+        else:
+            lines.append(f"- {date_str} | **{ev['title']}** | Sale time unknown")
+    await ctx.send("\n".join(lines))
+
+
+@bot.command(name="settime")
+async def cmd_settime(ctx, *, args: str):
+    """Set a sale time for a ticket event. Usage: !settime <event name> <time>
+    Example: !settime teamLab 10:00 AM"""
+    # Parse time from end of args — look for time pattern at the end
+    time_match = re.search(r"(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?)\s*$", args)
+    if not time_match:
+        await ctx.send("Couldn't find a time. Usage: `!settime teamLab 10:00 AM`")
+        return
+
+    time_str = time_match.group(1).strip()
+    search_name = args[:time_match.start()].strip()
+
+    if not search_name:
+        await ctx.send("Please include the event name. Usage: `!settime teamLab 10:00 AM`")
+        return
+
+    # Find matching ticket event
+    all_events = await db.get_all_events()
+    ticket_events = [
+        e for e in all_events
+        if is_ticket_event(e["start_time"], config.TRIP_START_DATE)
+    ]
+
+    match = None
+    search_lower = search_name.lower()
+    for ev in ticket_events:
+        if search_lower in ev["title"].lower():
+            match = ev
+            break
+
+    if not match:
+        names = ", ".join(ev["title"] for ev in ticket_events)
+        await ctx.send(f"No ticket event matching '{search_name}'. Available: {names}")
+        return
+
+    # Parse the time
+    clean_time = time_str.strip()
+    try:
+        time_part = None
+        for fmt in ("%I:%M %p", "%I:%M%p", "%H:%M"):
+            try:
+                time_part = datetime.strptime(clean_time, fmt)
+                break
+            except ValueError:
+                continue
+        if time_part is None:
+            raise ValueError(f"No format matched: {clean_time}")
+
+        event_date = match["start_time"][:10]
+        resolved_iso = f"{event_date}T{time_part.strftime('%H:%M:%S')}"
+        parsed = datetime.fromisoformat(resolved_iso)
+    except ValueError:
+        await ctx.send(f"Couldn't parse time '{time_str}'. Try format like `10:00 AM` or `14:00`")
+        return
+
+    # Save to DB
+    await db.set_resolved_time(match["event_id"], resolved_iso)
+
+    # Try to update Google Calendar
+    try:
+        end_iso = (parsed + timedelta(hours=1)).isoformat()
+        cal.update_event_time(config.CALENDAR_ID, match["event_id"], resolved_iso, end_iso)
+        await ctx.send(
+            f"Set sale time for **{match['title']}** to "
+            f"{parsed.strftime('%#I:%M %p')} on {event_date}. Calendar updated!"
+        )
+    except Exception as exc:
+        logger.error("Failed to update calendar: %s", exc)
+        await ctx.send(
+            f"Set sale time for **{match['title']}** to "
+            f"{parsed.strftime('%#I:%M %p')} on {event_date}. "
+            f"(Couldn't update calendar — but alerts will still work)"
+        )
+
+    # Schedule alerts for this event
+    updated = await db.get_event(match["event_id"])
+    if updated:
+        await schedule_ticket_alerts(updated)
+
+
+@bot.command(name="itinerary")
+async def cmd_itinerary(ctx):
+    """Show tomorrow's schedule on demand."""
+    now = datetime.now(tz)
+    tomorrow = now.date() + timedelta(days=1)
+    tomorrow_str = tomorrow.isoformat()
+
+    all_events = await db.get_events_for_date(tomorrow_str)
+
+    trip_events = [
+        e for e in all_events
+        if not is_ticket_event(e["start_time"], config.TRIP_START_DATE)
+    ]
+    ticket_events = [
+        e for e in all_events
+        if is_ticket_event(e["start_time"], config.TRIP_START_DATE)
+    ]
+
+    message = format_nightly_post(trip_events=trip_events, ticket_events=ticket_events)
+    if not message:
+        await ctx.send(f"Nothing planned for tomorrow ({tomorrow_str}).")
+    else:
+        await ctx.send(message)
 
 
 # ---------------------------------------------------------------------------
